@@ -20,7 +20,6 @@
             width: 100%; height: 100%;
             z-index: 0; background: #000;
         }
-        /* 移除強制 cover，讓畫面保持自然比例，避免掃描區錯位 */
         #qr-reader video {
             width: 100% !important; height: 100% !important; object-fit: cover !important;
         }
@@ -42,24 +41,31 @@
             background: #000; z-index: 20; pointer-events: auto;
             justify-content: center; text-align: center;
         }
-        .start-btn {
-            background: #1B9A4B; color: white; border: none; padding: 18px 50px;
-            font-size: 22px; font-weight: bold; border-radius: 50px; cursor: pointer;
-            box-shadow: 0 4px 20px rgba(27, 154, 75, 0.5);
-            min-width: 200px;
-        }
-        .start-btn:disabled { background: #555; color: #aaa; box-shadow: none; }
-        .start-hint { color: #888; margin-top: 20px; font-size: 14px; line-height: 1.6; }
+        .btn-group { display: flex; flex-direction: column; gap: 20px; width: 100%; align-items: center; }
         
-        /* 強制重整連結 */
-        .reload-link {
-            color: #666; text-decoration: underline; font-size: 14px; margin-top: 30px; cursor: pointer;
+        .start-btn {
+            background: #1B9A4B; color: white; border: none; padding: 18px 40px;
+            font-size: 20px; font-weight: bold; border-radius: 50px; cursor: pointer;
+            box-shadow: 0 4px 20px rgba(27, 154, 75, 0.5);
+            width: 80%; max-width: 300px;
         }
+        
+        /* B計畫：系統相機按鈕 */
+        .file-btn {
+            background: #333; color: white; border: 1px solid #555; padding: 15px 40px;
+            font-size: 18px; border-radius: 50px; cursor: pointer;
+            width: 80%; max-width: 300px;
+            display: flex; align-items: center; justify-content: center; gap: 10px;
+        }
+        .file-btn::before { content: '📷'; }
+
+        .start-hint { color: #888; margin-top: 20px; font-size: 14px; line-height: 1.6; }
+        .reload-link { color: #666; text-decoration: underline; font-size: 14px; margin-top: 30px; cursor: pointer; }
 
         /* --- 2. 掃描中介面 --- */
         #state-scanning { background: rgba(0,0,0,0.1); }
         .scan-frame {
-            position: relative; width: 260px; height: 260px;
+            position: relative; width: 250px; height: 250px;
             border: 2px solid rgba(255,255,255,0.9); border-radius: 20px;
             box-shadow: 0 0 0 4000px rgba(0,0,0,0.6); 
         }
@@ -102,6 +108,9 @@
         }
         .store-footer { color: rgba(255,255,255,0.6); font-size: 14px; font-weight: bold; text-align: center; }
         .hidden { display: none !important; opacity: 0; }
+        
+        /* 隱藏的檔案輸入框 */
+        #qr-input-file { display: none; }
     </style>
 </head>
 <body>
@@ -109,11 +118,14 @@
 
     <div id="state-start" class="overlay-layer">
         <div style="flex:1"></div>
-        <div>
-            <button id="btn-start" class="start-btn" onclick="requestCamera()">啟動掃描器</button>
+        <div class="btn-group">
+            <button id="btn-start" class="start-btn" onclick="startScannerFresh()">啟動掃描器</button>
+            
+            <button class="file-btn" onclick="document.getElementById('qr-input-file').click()">使用系統相機拍照</button>
+            <input type="file" id="qr-input-file" accept="image/*" capture="environment" onchange="scanFromFile(this)">
+            
             <div class="start-hint" id="status-msg">
-                請點擊按鈕開啟相機<br>
-                (Safari 請允許權限)
+                請點擊綠色按鈕開啟。<br>若無法啟動，請改用「系統相機拍照」。
             </div>
             <div class="reload-link" onclick="location.reload()">頁面卡住？點此重新整理</div>
         </div>
@@ -161,8 +173,8 @@
     };
     const resultCard = document.getElementById('result-card-body');
     
-    // 初始化
-    const html5QrCode = new Html5Qrcode('qr-reader');
+    // 全域變數
+    let html5QrCode = null; 
     let isProcessing = false;
 
     function switchState(stateName) {
@@ -208,7 +220,10 @@
         if (isProcessing) return;
         isProcessing = true;
         
-        try { await html5QrCode.pause(true); } catch(e){}
+        // 暫停掃描
+        if (html5QrCode) {
+            try { await html5QrCode.stop(); } catch(e){}
+        }
         
         switchState('load');
         const data = await updateCheckin(decodedText);
@@ -225,71 +240,66 @@
     }
 
     function resetScan() { 
-        switchState('scan'); 
-        html5QrCode.resume(); 
-        isProcessing = false; 
+        // 重置時，我們會完全銷毀舊的實例，等待下次按下啟動
+        // 這樣可以避免 Safari 的狀態鎖死問題
+        html5QrCode = null;
+        isProcessing = false;
+        switchState('start'); 
     }
 
-    // ★★★ Safari 救星邏輯：先列表，再啟動 ★★★
-    function requestCamera() {
+    // ★★★ A計畫：全新啟動 (解決 Safari 狀態問題) ★★★
+    function startScannerFresh() {
         const btn = document.getElementById('btn-start');
         const statusMsg = document.getElementById('status-msg');
         btn.disabled = true;
-        btn.textContent = "正在取得權限...";
-
-        // 步驟 1: 先呼叫 getCameras，這會強制跳出權限詢問
-        Html5Qrcode.getCameras().then(devices => {
-            if (devices && devices.length) {
-                // 步驟 2: 找到後鏡頭
-                // 嘗試找 "environment" 或 "back" 的鏡頭，找不到就用最後一個(通常是後鏡頭)
-                let cameraId = devices[0].id;
-                for (const device of devices) {
-                    const label = device.label.toLowerCase();
-                    if (label.includes('back') || label.includes('rear') || label.includes('environment')) {
-                        cameraId = device.id;
-                        break;
-                    }
-                }
-                
-                // 步驟 3: 用這個 ID 啟動
-                startScanner(cameraId);
-            } else {
-                throw "找不到相機裝置";
-            }
-        }).catch(err => {
-            console.error(err);
-            btn.disabled = false;
-            btn.textContent = "啟動失敗，點此重試";
-            statusMsg.innerHTML = `<span style="color:#ff5555">無法取得相機權限。<br>錯誤: ${err}</span>`;
-        });
-    }
-
-    function startScanner(cameraId) {
-        const btn = document.getElementById('btn-start');
-        const statusMsg = document.getElementById('status-msg');
         btn.textContent = "啟動中...";
 
-        // 設定：FPS 15 (平衡速度), 關閉 qrbox (全螢幕掃描), 設定高解析度
+        // 每次點擊都 new 一個新的實例，確保沒有舊狀態殘留
+        html5QrCode = new Html5Qrcode("qr-reader");
+
+        // 設定：加回 qrbox: 250 (解決靈敏度0的問題)
         const config = { 
-            fps: 15,
-            qrbox: undefined, // 確保掃描全螢幕，解決靈敏度問題
-            aspectRatio: undefined 
+            fps: 10, 
+            qrbox: { width: 250, height: 250 },
+            aspectRatio: 1.0
         };
 
-        // 這裡改用 cameraId 啟動，這是最穩定的方式
-        html5QrCode.start(
-            cameraId, 
-            config, 
-            onScanSuccess
-        ).then(() => {
-            switchState('scan');
-            btn.textContent = "啟動掃描器";
-            btn.disabled = false;
-        }).catch(err => {
-            btn.disabled = false;
-            btn.textContent = "啟動失敗";
-            statusMsg.innerHTML = `<span style="color:#ff5555">相機啟動錯誤: ${err}</span>`;
-        });
+        // 啟動
+        html5QrCode.start({ facingMode: "environment" }, config, onScanSuccess)
+            .then(() => {
+                switchState('scan');
+                btn.textContent = "啟動掃描器";
+                btn.disabled = false;
+            })
+            .catch(err => {
+                console.error(err);
+                btn.disabled = false;
+                btn.textContent = "啟動失敗";
+                statusMsg.innerHTML = `<span style="color:#ff5555">啟動失敗。請點擊下方的「使用系統相機拍照」來掃描。</span>`;
+            });
+    }
+
+    // ★★★ B計畫：系統相機 (Fallback) ★★★
+    function scanFromFile(input) {
+        if (input.files.length === 0) return;
+        
+        const file = input.files[0];
+        isProcessing = true;
+        switchState('load');
+
+        // 使用 html5-qrcode 的檔案掃描功能
+        // 這裡也需要一個實例，我們臨時 new 一個
+        const tempScanner = new Html5Qrcode("qr-reader");
+        
+        tempScanner.scanFile(file, true)
+            .then(decodedText => {
+                onScanSuccess(decodedText);
+            })
+            .catch(err => {
+                isProcessing = false;
+                switchState('start');
+                alert("圖片中找不到 QR Code，請重拍一張清楚的，或是對準一點。");
+            });
     }
     </script>
 </body>
